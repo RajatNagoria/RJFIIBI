@@ -14,6 +14,9 @@ export function makeContact(a, b, point, normal, penetration) {
     impulseN: 0,
     impulseT1: 0,
     impulseT2: 0,
+    tangent1: [0, 0, 0],
+    tangent2: [0, 0, 0],
+    warm: false,
   };
 }
 
@@ -118,6 +121,9 @@ function projectRadius(he, axes, L) {
        + he[2] * Math.abs(vec3.dot(axes[2], L));
 }
 
+// Box-box manifold: SAT finds the minimum-overlap axis, then all vertices
+// of each box that penetrate the other become contact points sharing that
+// normal. Edge-edge (cross-product axis) falls back to a single point.
 function boxBox(a, b, out) {
   extractAxes(a, _axesA);
   extractAxes(b, _axesB);
@@ -125,46 +131,107 @@ function boxBox(a, b, out) {
 
   let minOverlap = Infinity;
   let bestAxis = null;
+  let bestIsCross = false;
 
-  const testAxis = (L) => {
+  const testAxis = (L, isCross) => {
     const len = vec3.length(L);
-    if (len < 1e-5) return true; // near-parallel cross product, skip
+    if (len < 1e-5) return true;
     vec3.scale(L, L, 1 / len);
     const rA = projectRadius(a.halfExtents, _axesA, L);
     const rB = projectRadius(b.halfExtents, _axesB, L);
     const dist = Math.abs(vec3.dot(_d, L));
     const overlap = rA + rB - dist;
-    if (overlap < 0) return false; // separating axis found
+    if (overlap < 0) return false;
     if (overlap < minOverlap) {
       minOverlap = overlap;
       bestAxis = [L[0], L[1], L[2]];
+      bestIsCross = isCross;
     }
     return true;
   };
 
   for (let i = 0; i < 3; i++) {
-    if (!testAxis(_axesA[i])) return 0;
-    if (!testAxis(_axesB[i])) return 0;
+    if (!testAxis(_axesA[i], false)) return 0;
+    if (!testAxis(_axesB[i], false)) return 0;
   }
   for (let i = 0; i < 3; i++) {
     for (let j = 0; j < 3; j++) {
       vec3.cross(_L, _axesA[i], _axesB[j]);
-      if (!testAxis(_L)) return 0;
+      if (!testAxis(_L, true)) return 0;
     }
   }
 
-  // orient normal a -> b
   let n = bestAxis;
-  if (vec3.dot(n, _d) < 0) n = [-n[0], -n[1], -n[2]];
+  if (vec3.dot(n, _d) < 0) n = [-n[0], -n[1], -n[2]]; // orient a -> b
 
-  // contact point: midpoint between support points along the normal
-  const sA = supportPoint(a, n);
-  const nNeg = [-n[0], -n[1], -n[2]];
-  const sB = supportPoint(b, nNeg);
-  const point = [(sA[0] + sB[0]) / 2, (sA[1] + sB[1]) / 2, (sA[2] + sB[2]) / 2];
+  const before = out.length;
+  if (!bestIsCross) {
+    vertexFaceManifold(a, b, a, b, n, out);
+    vertexFaceManifold(a, b, b, a, n, out);
+  }
+  if (out.length === before) {
+    // edge-edge or degenerate: single support midpoint
+    const sA = supportPoint(a, n);
+    const nNeg = [-n[0], -n[1], -n[2]];
+    const sB = supportPoint(b, nNeg);
+    const point = [(sA[0] + sB[0]) / 2, (sA[1] + sB[1]) / 2, (sA[2] + sB[2]) / 2];
+    out.push(makeContact(a, b, point, n, minOverlap));
+    return 1;
+  }
 
-  out.push(makeContact(a, b, point, n, minOverlap));
-  return 1;
+  // dedupe by proximity, keep deepest 4
+  const contacts = out.splice(before);
+  contacts.sort((p, q) => q.penetration - p.penetration);
+  const kept = [];
+  for (const c of contacts) {
+    let dup = false;
+    for (const k of kept) {
+      const dx = c.point[0] - k.point[0], dy = c.point[1] - k.point[1], dz = c.point[2] - k.point[2];
+      if (dx * dx + dy * dy + dz * dz < 0.01) { dup = true; break; }
+    }
+    if (!dup) kept.push(c);
+    if (kept.length === 4) break;
+  }
+  for (const c of kept) out.push(c);
+  return out.length - before;
+}
+
+// Add contacts for each vertex of src that penetrates dst, along normal n (a->b).
+// The face of dst relevant here is the one whose outward normal points dst->src:
+// that is +sign(nL) when dst === a (n points away from a toward b), else -sign(nL).
+function vertexFaceManifold(pairA, pairB, src, dst, n, out) {
+  const heS = src.halfExtents, heD = dst.halfExtents;
+  quat.conjugate(_tmpQ, dst.orientation);
+  const nL = vec3.create(...n);
+  vec3.transformQuat(nL, nL, _tmpQ);
+  const ax = Math.abs(nL[0]), ay = Math.abs(nL[1]), az = Math.abs(nL[2]);
+  let fi = 0;
+  if (ay > ax && ay > az) fi = 1;
+  else if (az > ax) fi = 2;
+  const dir = (dst === pairA) ? 1 : -1;
+  const fsign = dir * (Math.sign(nL[fi]) || 1);
+  const margin = 0.1;
+
+  for (let i = 0; i < 8; i++) {
+    const sx = (i & 1) ? heS[0] : -heS[0];
+    const sy = (i & 2) ? heS[1] : -heS[1];
+    const sz = (i & 4) ? heS[2] : -heS[2];
+    vec3.set(_local, sx, sy, sz);
+    vec3.transformQuat(_local, _local, src.orientation);
+    const vx = src.position[0] + _local[0];
+    const vy = src.position[1] + _local[1];
+    const vz = src.position[2] + _local[2];
+    _local[0] = vx - dst.position[0];
+    _local[1] = vy - dst.position[1];
+    _local[2] = vz - dst.position[2];
+    vec3.transformQuat(_local, _local, _tmpQ);
+    if (Math.abs(_local[0]) > heD[0] + margin ||
+        Math.abs(_local[1]) > heD[1] + margin ||
+        Math.abs(_local[2]) > heD[2] + margin) continue;
+    const pen = heD[fi] - fsign * _local[fi];
+    if (pen < -0.1) continue;
+    out.push(makeContact(pairA, pairB, [vx, vy, vz], n, Math.max(pen, 0)));
+  }
 }
 
 const _supportAxes = [vec3.create(), vec3.create(), vec3.create()];

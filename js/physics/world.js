@@ -65,6 +65,7 @@ export class PhysicsWorld {
     this.events = [];      // impact events for audio/gameplay
     this.gravity = GRAVITY;
     this._pairSet = new Set();
+    this._contactCache = new Map();   // warm-start impulses across frames
     this._grid = new Map();
     this._aabb = new Float32Array(6);
     this.time = 0;
@@ -95,8 +96,16 @@ export class PhysicsWorld {
   }
 
   step(dt) {
-    this.time += dt;
     this.events.length = 0;
+    const S = 4;
+    const h = dt / S;
+    for (let s = 0; s < S; s++) this.substep(h);
+    for (const b of this.bodies) b.trySleep(dt);
+    this.removeDead();
+  }
+
+  substep(dt) {
+    this.time += dt;
 
     // 1. integrate forces
     for (const b of this.bodies) b.integrateForces(dt, this.gravity);
@@ -118,10 +127,43 @@ export class PhysicsWorld {
       }
     }
 
-    // 4. solve velocity constraints
+    // 3b. warm start from cached impulses
+    this.warmStart(contacts);
+
+    // 4. solve velocity constraints (reverse order on odd iterations to
+    // cancel Gauss-Seidel ordering bias)
     for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
       for (const j of this.joints) j.solve(dt);
-      for (const c of contacts) this.solveContact(c, dt, iter === 0);
+      if (iter % 2 === 0) {
+        for (const c of contacts) this.solveContact(c, dt, iter === 0);
+      } else {
+        for (let ci = contacts.length - 1; ci >= 0; ci--) this.solveContact(contacts[ci], dt, false);
+      }
+    }
+
+    // 4b. persist impulses for next frame
+    this.saveContacts(contacts);
+
+    // 5. non-linear positional correction (split-impulse style, translation only)
+    for (const c of contacts) {
+      const corr = Math.max(0, c.penetration - SLOP) * 0.35;
+      if (corr <= 0) continue;
+      const a = c.a, b = c.b;
+      const invA = a ? a.invMass : 0;
+      const invB = b.invMass;
+      const sum = invA + invB;
+      if (sum === 0) continue;
+      const k = corr / sum;
+      if (a && !a.isStatic && !a.asleep) {
+        a.position[0] -= c.normal[0] * k * invA;
+        a.position[1] -= c.normal[1] * k * invA;
+        a.position[2] -= c.normal[2] * k * invA;
+      }
+      if (!b.isStatic && !b.asleep) {
+        b.position[0] += c.normal[0] * k * invB;
+        b.position[1] += c.normal[1] * k * invB;
+        b.position[2] += c.normal[2] * k * invB;
+      }
     }
 
     // 5. impact events (based on accumulated normal impulse)
@@ -142,12 +184,59 @@ export class PhysicsWorld {
       }
     }
 
-    // 6. integrate positions, sleep, cleanup
-    for (const b of this.bodies) {
-      b.integratePositions(dt);
-      b.trySleep(dt);
+    // 6. integrate positions
+    for (const b of this.bodies) b.integratePositions(dt);
+  }
+
+
+  // Match new contacts against last frame's cache and re-apply accumulated
+  // impulses (warm starting) — key to stable stacks.
+  warmStart(contacts) {
+    for (const c of contacts) {
+      const idA = c.a ? c.a.id : 0;
+      const key = idA * 1048576 + c.b.id;
+      const prev = this._contactCache.get(key);
+      if (prev) {
+        for (const pc of prev) {
+          const dx = pc.point[0] - c.point[0];
+          const dy = pc.point[1] - c.point[1];
+          const dz = pc.point[2] - c.point[2];
+          if (dx * dx + dy * dy + dz * dz < 0.02) {
+            c.impulseN = pc.impulseN * 0.85;
+            c.impulseT1 = pc.impulseT1 * 0.85;
+            c.impulseT2 = pc.impulseT2 * 0.85;
+            c.warm = true;
+            break;
+          }
+        }
+      }
+      if (c.impulseN > 0 || c.impulseT1 !== 0 || c.impulseT2 !== 0) {
+        const a = c.a, b = c.b;
+        const ra = a ? [c.point[0] - a.position[0], c.point[1] - a.position[1], c.point[2] - a.position[2]] : null;
+        const rb = [c.point[0] - b.position[0], c.point[1] - b.position[1], c.point[2] - b.position[2]];
+        const n = c.normal, t1 = c.tangent1, t2 = c.tangent2;
+        applyPairImpulse(a, b, ra, rb,
+          n[0] * c.impulseN + t1[0] * c.impulseT1 + t2[0] * c.impulseT2,
+          n[1] * c.impulseN + t1[1] * c.impulseT1 + t2[1] * c.impulseT2,
+          n[2] * c.impulseN + t1[2] * c.impulseT1 + t2[2] * c.impulseT2);
+      }
     }
-    this.removeDead();
+  }
+
+  saveContacts(contacts) {
+    this._contactCache.clear();
+    for (const c of contacts) {
+      const idA = c.a ? c.a.id : 0;
+      const key = idA * 1048576 + c.b.id;
+      let list = this._contactCache.get(key);
+      if (!list) { list = []; this._contactCache.set(key, list); }
+      list.push({
+        point: c.point,
+        impulseN: c.impulseN,
+        impulseT1: c.impulseT1,
+        impulseT2: c.impulseT2,
+      });
+    }
   }
 
   // Uniform grid spatial hash on the XZ plane.
@@ -211,7 +300,7 @@ export class PhysicsWorld {
     const kn = effectiveMass(a, b, ra, rb, n);
 
     const e = Math.min(a ? a.restitution : 0, b.restitution);
-    let bias = (BAUMGARTE / dt) * Math.max(0, c.penetration - SLOP);
+    let bias = 0; // positional correction handles penetration (split impulse)
     if (vn < -RESTITUTION_THRESHOLD) bias += -e * vn; // restitution only for fast approach
 
     let lambda = -(vn - bias) / kn;
@@ -222,29 +311,43 @@ export class PhysicsWorld {
       applyPairImpulse(a, b, ra, rb, n[0] * lambda, n[1] * lambda, n[2] * lambda);
     }
 
-    // friction (two tangent directions, solved sequentially)
+    // Coulomb friction: two FIXED orthogonal tangents per contact, so
+    // accumulated impulses stay direction-consistent across iterations.
     if (c.impulseN > 0) {
       const mu = Math.sqrt((a ? a.friction : 0.7) * b.friction);
-      // recompute relative velocity after normal impulse
-      const va2 = contactVelocity(a, ra);
-      const vb2 = contactVelocity(b, rb);
-      let tx = vb2[0] - va2[0], ty = vb2[1] - va2[1], tz = vb2[2] - va2[2];
-      const tn = tx * n[0] + ty * n[1] + tz * n[2];
-      tx -= tn * n[0]; ty -= tn * n[1]; tz -= tn * n[2];
-      const tl = Math.hypot(tx, ty, tz);
-      if (tl > 1e-6) {
-        tx /= tl; ty /= tl; tz /= tl;
+      // build orthonormal basis around n (stable across the whole solve)
+      let t1x = n[2], t1y = 0, t1z = -n[0]; // cross(n, +Y)
+      let t1l = Math.hypot(t1x, t1y, t1z);
+      if (t1l < 1e-6) { t1x = 0; t1y = n[2]; t1z = -n[1]; t1l = Math.hypot(t1x, t1y, t1z); }
+      t1x /= t1l; t1y /= t1l; t1z /= t1l;
+      // t2 = n x t1
+      const t2x = n[1] * t1z - n[2] * t1y;
+      const t2y = n[2] * t1x - n[0] * t1z;
+      const t2z = n[0] * t1y - n[1] * t1x;
+      c.tangent1[0] = t1x; c.tangent1[1] = t1y; c.tangent1[2] = t1z;
+      c.tangent2[0] = t2x; c.tangent2[1] = t2y; c.tangent2[2] = t2z;
+
+      const maxF = mu * c.impulseN;
+      for (let ti = 0; ti < 2; ti++) {
+        const tx = ti === 0 ? t1x : t2x;
+        const ty = ti === 0 ? t1y : t2y;
+        const tz = ti === 0 ? t1z : t2z;
+        const va2 = contactVelocity(a, ra);
+        const vb2 = contactVelocity(b, rb);
+        const vt = (vb2[0] - va2[0]) * tx + (vb2[1] - va2[1]) * ty + (vb2[2] - va2[2]) * tz;
+        if (Math.abs(vt) < 1e-7) continue;
         const kt = effectiveMass(a, b, ra, rb, [tx, ty, tz]);
-        let lt = -tl / kt;
-        const maxF = mu * c.impulseN;
-        const oldT = c.impulseT1;
-        c.impulseT1 = Math.min(Math.max(oldT + lt, -maxF), maxF);
-        lt = c.impulseT1 - oldT;
+        let lt = -vt / kt;
+        const acc = ti === 0 ? 'impulseT1' : 'impulseT2';
+        const oldT = c[acc];
+        c[acc] = Math.min(Math.max(oldT + lt, -maxF), maxF);
+        lt = c[acc] - oldT;
         if (lt !== 0) {
           applyPairImpulse(a, b, ra, rb, tx * lt, ty * lt, tz * lt);
         }
       }
     }
+
   }
 }
 
