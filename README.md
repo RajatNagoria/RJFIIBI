@@ -79,7 +79,10 @@ or `npx serve .`
 
 ```bash
 node test/physics.test.mjs   # headless physics suite (stacks, joints, events)
-node test/browser.test.mjs   # full end-to-end render test in headless Chrome
+
+# end-to-end render test (requires: npm i puppeteer in /tmp/pptr,
+# plus chrome-headless-shell system libs -- used during development)
+node test/browser.test.mjs
 ```
 
 The physics suite verifies: spheres settle on terrain, 4-high box stacks stay
