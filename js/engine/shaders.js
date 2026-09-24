@@ -61,7 +61,8 @@ export const LIT_VS = /* glsl */`#version 300 es
     vWorldPos = wp.xyz;
     vNormal = mat3(uModel) * aNormal;
     vColor = aColor;
-    vShadowCoord = uLightVP * wp;
+    vec3 sn = normalize(vNormal);
+    vShadowCoord = uLightVP * vec4(wp.xyz + sn * 0.06, 1.0);
     gl_Position = uViewProj * wp;
   }
 `;
@@ -105,7 +106,7 @@ export const INST_VS = /* glsl */`#version 300 es
     vWorldPos = wp.xyz;
     vNormal = mat3(m) * aNormal;
     vColor = aColor * iColor;
-    vShadowCoord = uLightVP * wp;
+    vShadowCoord = uLightVP * vec4(wp.xyz + normalize(vNormal) * 0.06, 1.0);
     vSpec = iParams.y;   // specular amount
     gl_Position = uViewProj * wp;
   }

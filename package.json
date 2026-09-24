@@ -1,0 +1,10 @@
+{
+  "name": "vertex-engine",
+  "version": "1.0.0",
+  "description": "From-scratch WebGL2 game engine: renderer, physics, terrain, spatial audio",
+  "type": "module",
+  "scripts": {
+    "start": "python3 -m http.server 8080",
+    "test": "node test/physics.test.mjs"
+  }
+}

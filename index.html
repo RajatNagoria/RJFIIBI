@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VERTEX — WebGL Physics Sandbox</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <canvas id="gl"></canvas>
+
+  <div id="hud">
+    <div id="stats"></div>
+    <div id="crosshair" class="hidden"><div class="dot"></div></div>
+    <div id="toast" class="hidden"></div>
+
+    <div id="help">
+      <h3>Controls</h3>
+      <table>
+        <tr><td>W A S D</td><td>Move</td></tr>
+        <tr><td>Mouse</td><td>Look</td></tr>
+        <tr><td>Shift</td><td>Sprint</td></tr>
+        <tr><td>Space</td><td>Jump</td></tr>
+        <tr><td>Left click</td><td>Launch cannonball</td></tr>
+        <tr><td>B</td><td>Spawn crate tower</td></tr>
+        <tr><td>N</td><td>Spawn pyramid</td></tr>
+        <tr><td>G</td><td>Spawn dominoes</td></tr>
+        <tr><td>V</td><td>Spawn wrecking ball</td></tr>
+        <tr><td>R</td><td>Reset scene</td></tr>
+        <tr><td>M</td><td>Mute</td></tr>
+        <tr><td>H</td><td>Toggle this help</td></tr>
+      </table>
+    </div>
+
+    <div id="overlay">
+      <div class="panel">
+        <h1>VERTEX</h1>
+        <p class="sub">A from-scratch WebGL2 game engine: custom renderer, rigid-body physics,
+        procedural terrain &amp; spatial audio. No libraries.</p>
+        <p class="cta">Click to play</p>
+        <p class="fine">WASD move · click shoots cannonballs · B/N/G/V spawn structures · H help</p>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
